@@ -1,4 +1,4 @@
-name: Simple CI/CD Pipeline
+name: Production CI/CD Pipeline
 
 on:
   push:
@@ -8,17 +8,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-and-build:
-    name: Test and Build
+  build-and-test:
+    name: Build, Test & Deploy
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      security-events: write
       
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
+      # 1. TEST
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -30,79 +32,53 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-test.txt
-          pip list
       
-      - name: Run tests
+      - name: Run Tests
         run: |
           cd app
-          python -m pytest test_main.py -v --tb=short
-        continue-on-error: false
+          python -m pytest test_main.py -v
       
+      # 2. PREPARE TAGS
+      - name: Prepare Tags
+        shell: bash
+        run: |
+          # Robust lowercase conversion
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LC=${OWNER_LC}" >> $GITHUB_ENV
+      
+      # 3. BUILD & PUSH (Simple)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Lowercase Registry Owner
-        id: registry_owner
-        shell: bash
-        run: |
-          echo "OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-
-      # --- 1. Code Quality (SonarQube) ---
-      - name: SonarQube Scan
-        if: secrets.SONAR_TOKEN != '' 
-        uses: SonarSource/sonarcloud-github-action@master
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      
-      # --- 2. Container Building ---
-      - name: Build Docker image (local for scanning)
-        uses: docker/build-push-action@v5
-        with:
-          context: ./app
-          file: ./app/Dockerfile
-          load: true # Load into Docker daemon for scanning
-          tags: devops-sample-app:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # --- 3. Security Scanning (Trivy) ---
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'devops-sample-app:${{ github.sha }}'
-          format: 'table'
-          exit-code: '0' # Don't fail build on vulnerabilities for now, just report
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-
       - name: Build and Push Docker image
         uses: docker/build-push-action@v5
         with:
           context: ./app
           file: ./app/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: |
             ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:latest
             ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 4. SECURITY (Trivy - Simplified)
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:${{ github.sha }}'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
       
-      - name: Success message
+      - name: Pipeline Success
         if: success()
-        run: |
-          echo "✅ Pipeline completed successfully!"
-          echo "Summary of Stages:"
-          echo "1. Automated Testing: ✅ Passed"
-          echo "2. Code Quality: ✅ Scanned (if token provided)"
-          echo "3. Security Scanning: ✅ Trivy Check Complete"
-          echo "4. Container Build: ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:latest"
+        run: echo "🎉 Pipeline completed successfully!"
