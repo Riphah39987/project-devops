@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: app
-        image: ghcr.io/yourusername/devops-sample-app:latest
+        image: ghcr.io/riphah39987/devops-sample-app:latest
         imagePullPolicy: Always
         ports:
         - name: http
