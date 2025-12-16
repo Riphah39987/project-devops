@@ -56,7 +56,38 @@ jobs:
         env:
           OWNER: '${{ github.repository_owner }}'
 
-      - name: Build Docker image
+      # --- 1. Code Quality (SonarQube) ---
+      - name: SonarQube Scan
+        # Only run if SONAR_TOKEN is set to allow pipeline to pass without it for now
+        if: ${{ secrets.SONAR_TOKEN != '' }} 
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      
+      # --- 2. Container Building ---
+      - name: Build Docker image (local for scanning)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          load: true # Load into Docker daemon for scanning
+          tags: devops-sample-app:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- 3. Security Scanning (Trivy) ---
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'devops-sample-app:${{ github.sha }}'
+          format: 'table'
+          exit-code: '0' # Don't fail build on vulnerabilities for now, just report
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Build and Push Docker image
         uses: docker/build-push-action@v5
         with:
           context: ./app
@@ -72,4 +103,8 @@ jobs:
         if: success()
         run: |
           echo "✅ Pipeline completed successfully!"
-          echo "Docker image: ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:latest"
+          echo "Summary of Stages:"
+          echo "1. Automated Testing: ✅ Passed"
+          echo "2. Code Quality: ✅ Scanned (if token provided)"
+          echo "3. Security Scanning: ✅ Trivy Check Complete"
+          echo "4. Container Build: ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:latest"
