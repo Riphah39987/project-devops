@@ -38,7 +38,15 @@ jobs:
           cd app
           python -m pytest test_main.py -v
       
-      # 2. PREPARE TAGS
+      # 2. CODE QUALITY (SonarQube)
+      - name: SonarQube Scan
+        if: secrets.SONAR_TOKEN != ''
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      
+      # 3. PREPARE TAGS
       - name: Prepare Tags
         shell: bash
         run: |
