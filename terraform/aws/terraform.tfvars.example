@@ -1,0 +1,28 @@
+# AWS Region
+aws_region = "us-east-1"
+
+# Environment
+environment = "dev"
+
+# Project Name
+project_name = "devops-multicloud"
+
+# VPC Configuration
+vpc_cidr             = "10.0.0.0/16"
+availability_zones   = ["us-east-1a", "us-east-1b"]
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs = ["10.0.10.0/24", "10.0.20.0/24"]
+
+# EKS Configuration
+eks_cluster_name       = "devops-eks-cluster"
+eks_node_instance_type = "t3.medium"
+eks_desired_capacity   = 2
+eks_min_capacity       = 1
+eks_max_capacity       = 3
+
+# RDS Configuration
+db_name           = "devopsdb"
+db_username       = "admin"
+# Set password via environment variable: TF_VAR_db_password
+# Or uncomment and set: db_password = "YourSecurePassword123!"
+db_instance_class = "db.t3.micro"

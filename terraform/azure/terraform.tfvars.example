@@ -1,0 +1,29 @@
+# Azure Location
+location = "eastus"
+
+# Environment
+environment = "dev"
+
+# Project Name
+project_name = "devops-multicloud"
+
+# VNet Configuration
+vnet_address_space = ["10.1.0.0/16"]
+subnet_prefixes    = ["10.1.1.0/24", "10.1.2.0/24"]
+subnet_names       = ["subnet-1", "subnet-2"]
+
+# AKS Configuration
+aks_cluster_name = "devops-aks-cluster"
+aks_dns_prefix   = "devopsaks"
+aks_node_count   = 2
+aks_node_vm_size = "Standard_B2s"
+
+# SQL Configuration
+sql_admin_username = "sqladmin"
+# Set password via environment variable: TF_VAR_sql_admin_password
+# Or uncomment and set: sql_admin_password = "YourSecurePassword123!"
+sql_database_name = "devopsdb"
+
+# Storage Configuration
+storage_account_tier        = "Standard"
+storage_account_replication = "LRS"

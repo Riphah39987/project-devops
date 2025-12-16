@@ -1,0 +1,311 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  APP_NAME: devops-sample-app
+  DOCKER_REGISTRY: ghcr.io
+  DOCKER_IMAGE: ${{ github.repository_owner }}/devops-sample-app
+
+jobs:
+  code-quality:
+    name: Code Quality Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for SonarQube
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r app/requirements.txt
+          pip install pylint flake8 black isort
+      
+      - name: Run Black formatter check
+        run: |
+          black --check app/ || true
+      
+      - name: Run isort import check
+        run: |
+          isort --check-only app/ || true
+      
+      - name: Run Flake8
+        run: |
+          flake8 app/ --max-line-length=120 --exclude=__pycache__ || true
+      
+      - name: Run Pylint
+        run: |
+          pylint app/*.py --max-line-length=120 || true
+      
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ env.APP_NAME }}
+            -Dsonar.sources=app/
+            -Dsonar.exclusions=**/test_*.py,**/__pycache__/**
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r app/requirements.txt
+          pip install -r app/requirements-test.txt
+      
+      - name: Run tests with coverage
+        run: |
+          cd app
+          pytest test_main.py -v --cov=. --cov-report=xml --cov-report=html --junitxml=test-results.xml
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./app/coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results
+          path: app/test-results.xml
+      
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: app/htmlcov/
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:buildcache,mode=max
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+      
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      - name: Generate Trivy HTML report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest
+          format: 'template'
+          template: '@/contrib/html.tpl'
+          output: 'trivy-report.html'
+          severity: 'HIGH,CRITICAL'
+      
+      - name: Upload Trivy HTML report
+        uses: actions/upload-artifact@v3
+        with:
+          name: trivy-security-report
+          path: trivy-report.html
+
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+      url: https://app.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          mkdir -p ~/.kube
+          echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl set image deployment/${{ env.APP_NAME }} \
+            ${{ env.APP_NAME }}=${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:${{ github.sha }} \
+            --namespace=production
+          
+          kubectl rollout status deployment/${{ env.APP_NAME }} \
+            --namespace=production \
+            --timeout=5m
+      
+      - name: Verify deployment
+        run: |
+          kubectl get deployments -n production
+          kubectl get pods -n production
+          kubectl get services -n production
+
+  smoke-test:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Wait for deployment
+        run: sleep 30
+      
+      - name: Run smoke tests
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          # Health check
+          response=$(curl -s -o /dev/null -w "%{http_code}" $APP_URL/health)
+          if [ $response != "200" ]; then
+            echo "Health check failed with status $response"
+            exit 1
+          fi
+          
+          # Root endpoint check
+          response=$(curl -s -o /dev/null -w "%{http_code}" $APP_URL/)
+          if [ $response != "200" ]; then
+            echo "Root endpoint check failed with status $response"
+            exit 1
+          fi
+          
+          echo "All smoke tests passed!"
+
+  performance-metrics:
+    name: Performance Metrics
+    runs-on: ubuntu-latest
+    needs: [build, test, security-scan]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Generate metrics report
+        run: |
+          echo "# Pipeline Performance Metrics" > metrics-report.md
+          echo "" >> metrics-report.md
+          echo "## Build Information" >> metrics-report.md
+          echo "- **Build Number**: ${{ github.run_number }}" >> metrics-report.md
+          echo "- **Commit**: ${{ github.sha }}" >> metrics-report.md
+          echo "- **Branch**: ${{ github.ref_name }}" >> metrics-report.md
+          echo "- **Triggered by**: ${{ github.actor }}" >> metrics-report.md
+          echo "" >> metrics-report.md
+          echo "## Timing Information" >> metrics-report.md
+          echo "- **Started**: ${{ github.event.repository.updated_at }}" >> metrics-report.md
+          echo "- **Duration**: Available after completion" >> metrics-report.md
+          
+      - name: Upload metrics report
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-metrics
+          path: metrics-report.md
+
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [deploy, smoke-test]
+    if: always()
+    
+    steps:
+      - name: Notify on success
+        if: ${{ needs.deploy.result == 'success' && needs.smoke-test.result == 'success' }}
+        run: |
+          echo "✅ Deployment successful!"
+          # Add Slack/email notification here
+      
+      - name: Notify on failure
+        if: ${{ needs.deploy.result == 'failure' || needs.smoke-test.result == 'failure' }}
+        run: |
+          echo "❌ Deployment failed!"
+          # Add Slack/email notification here

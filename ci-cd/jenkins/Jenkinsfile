@@ -1,0 +1,203 @@
+pipeline {
+    agent any
+    
+    environment {
+        APP_NAME = 'devops-sample-app'
+        DOCKER_REGISTRY = 'docker.io'
+        DOCKER_CREDENTIALS = credentials('dockerhub-credentials')
+        SONARQUBE_SERVER = 'sonarqube'
+        TRIVY_VERSION = 'latest'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out code from repository...'
+                checkout scm
+                sh 'git rev-parse --short HEAD > .git/commit-id'
+                script {
+                    env.GIT_COMMIT_SHORT = readFile('.git/commit-id').trim()
+                }
+            }
+        }
+        
+        stage('Code Quality Check') {
+            steps {
+                echo 'Running code quality analysis with SonarQube...'
+                script {
+                    def scannerHome = tool 'SonarQubeScanner'
+                    withSonarQubeEnv('SonarQube') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                                -Dsonar.projectKey=${APP_NAME} \
+                                -Dsonar.projectName=${APP_NAME} \
+                                -Dsonar.projectVersion=${GIT_COMMIT_SHORT} \
+                                -Dsonar.sources=app/ \
+                                -Dsonar.python.coverage.reportPaths=coverage.xml \
+                                -Dsonar.exclusions=**/test_*.py,**/__pycache__/**
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                echo 'Waiting for SonarQube Quality Gate result...'
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                echo 'Running unit tests...'
+                dir('app') {
+                    sh '''
+                        pip install -r requirements.txt
+                        pip install -r requirements-test.txt
+                        pytest test_main.py -v --cov=. --cov-report=xml --cov-report=html
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'app/test-results/*.xml'
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'app/htmlcov',
+                        reportFiles: 'index.html',
+                        reportName: 'Code Coverage Report'
+                    ])
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                echo "Building Docker image: ${DOCKER_REGISTRY}/${APP_NAME}:${GIT_COMMIT_SHORT}"
+                script {
+                    docker.build("${DOCKER_REGISTRY}/${APP_NAME}:${GIT_COMMIT_SHORT}", "./app")
+                    docker.build("${DOCKER_REGISTRY}/${APP_NAME}:latest", "./app")
+                }
+            }
+        }
+        
+        stage('Security Scan - Trivy') {
+            steps {
+                echo 'Scanning Docker image for vulnerabilities with Trivy...'
+                sh """
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:${TRIVY_VERSION} image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 0 \
+                        --format json \
+                        --output trivy-report.json \
+                        ${DOCKER_REGISTRY}/${APP_NAME}:${GIT_COMMIT_SHORT}
+                """
+                
+                // Generate HTML report
+                sh """
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:${TRIVY_VERSION} image \
+                        --severity HIGH,CRITICAL \
+                        --format template \
+                        --template '@contrib/html.tpl' \
+                        --output trivy-report.html \
+                        ${DOCKER_REGISTRY}/${APP_NAME}:${GIT_COMMIT_SHORT}
+                """
+            }
+            post {
+                always {
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: '.',
+                        reportFiles: 'trivy-report.html',
+                        reportName: 'Trivy Security Scan'
+                    ])
+                    archiveArtifacts artifacts: 'trivy-report.json', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Push to Registry') {
+            steps {
+                echo "Pushing image to ${DOCKER_REGISTRY}..."
+                script {
+                    docker.withRegistry("https://${DOCKER_REGISTRY}", 'dockerhub-credentials') {
+                        docker.image("${DOCKER_REGISTRY}/${APP_NAME}:${GIT_COMMIT_SHORT}").push()
+                        docker.image("${DOCKER_REGISTRY}/${APP_NAME}:latest").push()
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Deploying to Kubernetes cluster...'
+                script {
+                    withKubeConfig([credentialsId: 'kubeconfig']) {
+                        sh """
+                            kubectl set image deployment/${APP_NAME} \
+                                ${APP_NAME}=${DOCKER_REGISTRY}/${APP_NAME}:${GIT_COMMIT_SHORT} \
+                                --namespace=production
+                            
+                            kubectl rollout status deployment/${APP_NAME} \
+                                --namespace=production \
+                                --timeout=5m
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Smoke Tests') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'Running smoke tests on deployed application...'
+                script {
+                    sh '''
+                        # Wait for deployment to stabilize
+                        sleep 30
+                        
+                        # Get service endpoint
+                        ENDPOINT=$(kubectl get service ${APP_NAME} -n production -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                        
+                        # Run smoke tests
+                        curl -f http://${ENDPOINT}/health || exit 1
+                        curl -f http://${ENDPOINT}/ || exit 1
+                        
+                        echo "Smoke tests passed!"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline completed'
+            cleanWs()
+        }
+        success {
+            echo 'Pipeline succeeded!'
+            // Add notification (Slack, email, etc.)
+        }
+        failure {
+            echo 'Pipeline failed!'
+            // Add notification (Slack, email, etc.)
+        }
+    }
+}

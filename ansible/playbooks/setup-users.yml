@@ -1,0 +1,157 @@
+---
+- name: Setup users and SSH access
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    devops_users:
+      - name: devops
+        uid: 2000
+        groups: ['sudo', 'docker']
+        ssh_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDExample... devops@example.com"
+      - name: developer
+        uid: 2001
+        groups: ['docker']
+        ssh_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDExample... developer@example.com"
+    
+    admin_users:
+      - name: admin
+        uid: 1500
+        groups: ['sudo', 'docker', 'adm']
+        ssh_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDExample... admin@example.com"
+
+  tasks:
+    - name: Ensure required groups exist
+      group:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - docker
+        - sudo
+
+    - name: Create DevOps users
+      user:
+        name: "{{ item.name }}"
+        uid: "{{ item.uid }}"
+        groups: "{{ item.groups }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+      loop: "{{ devops_users }}"
+
+    - name: Create admin users
+      user:
+        name: "{{ item.name }}"
+        uid: "{{ item.uid }}"
+        groups: "{{ item.groups }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+      loop: "{{ admin_users }}"
+
+    - name: Set up SSH directory for DevOps users
+      file:
+        path: "/home/{{ item.name }}/.ssh"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0700'
+      loop: "{{ devops_users }}"
+
+    - name: Set up SSH directory for admin users
+      file:
+        path: "/home/{{ item.name }}/.ssh"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0700'
+      loop: "{{ admin_users }}"
+
+    - name: Add SSH keys for DevOps users
+      authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.ssh_key }}"
+        state: present
+      loop: "{{ devops_users }}"
+
+    - name: Add SSH keys for admin users
+      authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.ssh_key }}"
+        state: present
+      loop: "{{ admin_users }}"
+
+    - name: Configure sudoers for admin access
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: '^%sudo'
+        line: '%sudo ALL=(ALL:ALL) NOPASSWD:ALL'
+        validate: 'visudo -cf %s'
+
+    - name: Set password policies
+      lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_MAX_DAYS'
+        line: 'PASS_MAX_DAYS   90'
+        state: present
+
+    - name: Set minimum password length
+      lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_MIN_LEN'
+        line: 'PASS_MIN_LEN    12'
+        state: present
+
+    - name: Configure SSH to disable password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        state: present
+      notify: Restart SSH
+
+    - name: Configure SSH to disable root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+      notify: Restart SSH
+
+    - name: Enable SSH public key authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PubkeyAuthentication'
+        line: 'PubkeyAuthentication yes'
+        state: present
+      notify: Restart SSH
+
+    - name: Create bashrc customization for DevOps users
+      copy:
+        dest: "/home/{{ item.name }}/.bashrc_custom"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+        content: |
+          # Custom DevOps environment
+          export PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+          alias ll='ls -alh'
+          alias k='kubectl'
+          alias d='docker'
+          export PATH=$PATH:/usr/local/bin
+      loop: "{{ devops_users }}"
+
+    - name: Source custom bashrc
+      lineinfile:
+        path: "/home/{{ item.name }}/.bashrc"
+        line: "source ~/.bashrc_custom"
+        state: present
+      loop: "{{ devops_users }}"
+
+  handlers:
+    - name: Restart SSH
+      systemd:
+        name: sshd
+        state: restarted
