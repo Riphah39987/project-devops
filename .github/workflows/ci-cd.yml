@@ -51,15 +51,13 @@ jobs:
       
       - name: Lowercase Registry Owner
         id: registry_owner
+        shell: bash
         run: |
-          echo "OWNER_LC=${OWNER,,}" >>${GITHUB_ENV}
-        env:
-          OWNER: '${{ github.repository_owner }}'
+          echo "OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       # --- 1. Code Quality (SonarQube) ---
       - name: SonarQube Scan
-        # Only run if SONAR_TOKEN is set to allow pipeline to pass without it for now
-        if: ${{ secrets.SONAR_TOKEN != '' }} 
+        if: ${{ secrets.SONAR_TOKEN }} 
         uses: SonarSource/sonarcloud-github-action@master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
