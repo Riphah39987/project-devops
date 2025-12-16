@@ -38,8 +38,8 @@ jobs:
           cd app
           python -m pytest test_main.py -v
       
-      # 2. CODE QUALITY (SonarQube)
-      - name: SonarQube Scan
+      # 2. CODE QUALITY
+      - name: Code Quality Check
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,7 +54,7 @@ jobs:
           OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "OWNER_LC=${OWNER_LC}" >> $GITHUB_ENV
       
-      # 3. BUILD & PUSH (Simple)
+      # 4. BUILD & PUSH
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
@@ -65,7 +65,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Build and Push Docker image
+      - name: Build Docker Image Push
         uses: docker/build-push-action@v5
         with:
           context: ./app
@@ -77,8 +77,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 4. SECURITY (Trivy - Simplified)
-      - name: Run Trivy vulnerability scanner
+      # 5. SECURITY
+      - name: Security Scan with Trivy
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: 'ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:${{ github.sha }}'
@@ -86,6 +86,13 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
+
+      # 6. PERFORMANCE
+      - name: Collected Performance
+        run: |
+          echo "Collecting performance metrics..."
+          # Simulate performance collection
+          docker run --rm ghcr.io/${{ env.OWNER_LC }}/devops-sample-app:${{ github.sha }} python -c "import time; start=time.time(); [x**2 for x in range(1000000)]; print(f'Performance test: {time.time()-start:.4f}s')"
       
       - name: Pipeline Success
         if: success()
